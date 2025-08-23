@@ -7,6 +7,11 @@ puppeteer.use(StealthPlugin());
 const app = express();
 app.use(express.json());
 
+// ---- Health check route ----
+app.get("/", (req, res) => {
+  res.send("✅ API is live! Use POST /analyze with { url: 'https://example.com' }");
+});
+
 // ---- DOM path helper ----
 const domPathFn = `
 function getDomPath(el) {
@@ -136,7 +141,7 @@ app.post("/analyze", async (req, res) => {
 
       // Retry in non-headless mode (once)
       browser = await puppeteer.launch({
-        headless: false, // open a real Chrome window
+        headless: false,
         args: ["--no-sandbox", "--disable-setuid-sandbox"]
       });
       const retryPage = await browser.newPage();
