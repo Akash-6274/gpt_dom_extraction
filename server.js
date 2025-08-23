@@ -1,13 +1,14 @@
 // server.js
 const express = require("express");
-const puppeteer = require("puppeteer-extra");
+const puppeteerExtra = require("puppeteer-extra");
+const { executablePath } = require("puppeteer"); // fallback path to Chromium
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 
-puppeteer.use(StealthPlugin());
+puppeteerExtra.use(StealthPlugin());
 
 const app = express();
 app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // allow HTML form posts
+app.use(express.urlencoded({ extended: true })); // allow HTML form submissions
 
 // ---- Health check + simple test page ----
 app.get("/", (req, res) => {
@@ -21,7 +22,7 @@ app.get("/", (req, res) => {
   `);
 });
 
-// ---- DOM path helper ----
+// ---- DOM path helper (runs in page context) ----
 const domPathFn = `
 function getDomPath(el) {
   if (!el) return "";
@@ -46,13 +47,14 @@ function getDomPath(el) {
 }
 `;
 
-// ---- page extraction ----
+// ---- Extraction logic (runs in page) ----
 async function extractPageData(page) {
   return await page.evaluate((domPathFn) => {
     eval(domPathFn);
 
     const h1 = document.querySelector("h1");
 
+    // Strapline
     const strap = (() => {
       let candidate = h1 && h1.nextElementSibling;
       while (candidate && (candidate.tagName === "BR" || candidate.textContent.trim() === "")) {
@@ -64,6 +66,7 @@ async function extractPageData(page) {
       return document.querySelector("h2, h3, h4, h5, h6, p, span, [data-strap], .subtitle, .tagline");
     })();
 
+    // CTA (skip auth)
     const cta = (() => {
       const selectors = [
         "a[role='button']", "button", "a.btn", ".btn", ".button", ".cta", ".primary",
@@ -72,30 +75,26 @@ async function extractPageData(page) {
         "[aria-label*='join']", "[aria-label*='buy']", "[aria-label*='sign']",
         "[aria-label*='register']", "[aria-label*='demo']"
       ].join(", ");
-
       const disallowedAuth = /login|sign ?in|sign ?up/i;
 
-      let anchorNode = strap || h1;
-      let candidate = anchorNode && anchorNode.nextElementSibling;
-      while (candidate) {
+      let anchor = strap || h1;
+      let cand = anchor && anchor.nextElementSibling;
+      while (cand) {
         if (
-          candidate.matches &&
-          candidate.matches(selectors) &&
-          candidate.textContent.trim().length > 0 &&
-          !disallowedAuth.test(candidate.textContent.trim())
-        ) {
-          return candidate;
-        }
-        candidate = candidate.nextElementSibling;
+          cand.matches &&
+          cand.matches(selectors) &&
+          cand.textContent.trim().length > 0 &&
+          !disallowedAuth.test(cand.textContent.trim())
+        ) return cand;
+        cand = cand.nextElementSibling;
       }
 
-      const globalCandidates = Array.from(document.querySelectorAll(selectors)).filter(
-        el =>
-          el.textContent.trim().length > 0 &&
-          !disallowedAuth.test(el.textContent.trim()) &&
-          !el.closest("footer")
+      const globals = Array.from(document.querySelectorAll(selectors)).filter(
+        el => el.textContent.trim().length > 0 &&
+              !disallowedAuth.test(el.textContent.trim()) &&
+              !el.closest("footer")
       );
-      return globalCandidates.length ? globalCandidates[0] : null;
+      return globals[0] || null;
     })();
 
     return {
@@ -106,7 +105,7 @@ async function extractPageData(page) {
   }, domPathFn);
 }
 
-// ---- captcha detection ----
+// ---- Captcha detection ----
 async function detectCaptcha(page) {
   return await page.evaluate(() => {
     const text = document.body.innerText.toLowerCase();
@@ -117,19 +116,18 @@ async function detectCaptcha(page) {
       "input[name='captcha']",
       "form[action*='captcha']"
     ];
-    const hasCaptchaElements = selectors.some(sel => document.querySelector(sel));
-    return text.includes("captcha") || text.includes("verify you are human") || hasCaptchaElements;
+    const hasCaptcha = selectors.some(sel => document.querySelector(sel));
+    return text.includes("captcha") || text.includes("verify you are human") || hasCaptcha;
   });
 }
 
-// ---- helper to launch Puppeteer with correct Chrome on Render ----
+// ---- Helper: launch Puppeteer with correct Chrome path on Render ----
 async function launchBrowser({ headless = true } = {}) {
-  return await puppeteer.launch({
+  return await puppeteerExtra.launch({
     headless,
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
-    // On Render, postinstall or build command installs Chrome and sets this var.
-    // Locally, fall back to Puppeteer's bundled Chromium.
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined
+    // Use Chrome installed by build step on Render, otherwise fallback to bundled Chromium
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || executablePath()
   });
 }
 
@@ -142,6 +140,7 @@ app.post("/analyze", async (req, res) => {
 
   let browser;
   try {
+    // 1) headless pass
     browser = await launchBrowser({ headless: true });
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
@@ -149,14 +148,13 @@ app.post("/analyze", async (req, res) => {
     if (await detectCaptcha(page)) {
       await browser.close();
 
+      // 2) retry with full browser
       browser = await launchBrowser({ headless: false });
       const retryPage = await browser.newPage();
       await retryPage.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
 
       if (await detectCaptcha(retryPage)) {
-        return res.status(403).json({
-          error: "Captcha detected — site blocked automated access (even with full browser)"
-        });
+        return res.status(403).json({ error: "Captcha detected — site blocked automated access (even with full browser)" });
       }
 
       const retried = await extractPageData(retryPage);
@@ -184,7 +182,6 @@ app.post("/analyze", async (req, res) => {
       ],
       notes: ""
     });
-
   } catch (err) {
     console.error("❌ Error analyzing page:", err);
     res.status(500).json({ error: err.message });
@@ -193,7 +190,7 @@ app.post("/analyze", async (req, res) => {
   }
 });
 
-// ---- start server (MUST be at the very bottom) ----
+// ---- start server (keep at bottom) ----
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
