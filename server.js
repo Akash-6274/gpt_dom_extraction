@@ -2,17 +2,17 @@
 const express = require("express");
 const puppeteerExtra = require("puppeteer-extra");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
-const { executablePath } = require("puppeteer"); // fallback to bundled Chromium (local dev)
 const fs = require("fs");
 const path = require("path");
+const { executablePath } = require("puppeteer");
 
 puppeteerExtra.use(StealthPlugin());
 
 const app = express();
 app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // allow HTML form submissions
+app.use(express.urlencoded({ extended: true }));
 
-// ---------- Simple test page ----------
+// ---- Health check + test page ----
 app.get("/", (req, res) => {
   res.send(`
     <h2>🚀 GPT DOM Extraction API</h2>
@@ -24,40 +24,30 @@ app.get("/", (req, res) => {
   `);
 });
 
-// ---------- Chrome path resolution for Render ----------
+// --- Chrome path resolver ---
 function findChromeUnder(base) {
-  try {
-    if (!fs.existsSync(base)) return null;
-    const versions = fs.readdirSync(base).filter(d => d.startsWith("linux-")).sort();
-    if (!versions.length) return null;
-    const latest = versions[versions.length - 1];
-    const candidate = path.join(base, latest, "chrome-linux64", "chrome");
-    return fs.existsSync(candidate) ? candidate : null;
-  } catch {
-    return null;
-  }
+  if (!fs.existsSync(base)) return null;
+  const versions = fs.readdirSync(base).filter(d => d.startsWith("linux-")).sort();
+  if (!versions.length) return null;
+  const latest = versions[versions.length - 1];
+  const candidate = path.join(base, latest, "chrome-linux64", "chrome");
+  return fs.existsSync(candidate) ? candidate : null;
 }
 
 function resolveChromePath() {
-  // 1) If explicitly set and exists, use it
-  const envPath = process.env.PUPPETEER_EXECUTABLE_PATH;
-  if (envPath && fs.existsSync(envPath)) return envPath;
-
-  // 2) Preferred: Chrome installed into the project slug during build
-  // Build Command should be:
-  // PUPPETEER_CACHE_DIR=$PWD/.cache/puppeteer npm install && npx puppeteer browsers install chrome
+  // 1) Project slug cache (good path)
   const inProject = findChromeUnder("/opt/render/project/.cache/puppeteer/chrome");
   if (inProject) return inProject;
 
-  // 3) Fallback: older location in Render’s global cache
+  // 2) Legacy build cache (sometimes used)
   const inRenderCache = findChromeUnder("/opt/render/.cache/puppeteer/chrome");
   if (inRenderCache) return inRenderCache;
 
-  // 4) Local development fallback
+  // 3) Local dev fallback
   return executablePath();
 }
 
-// ---------- Puppeteer launcher ----------
+// --- Launch browser helper ---
 async function launchBrowser({ headless = true } = {}) {
   return await puppeteerExtra.launch({
     headless,
@@ -72,7 +62,7 @@ async function launchBrowser({ headless = true } = {}) {
   });
 }
 
-// ---------- DOM path helper (runs in page) ----------
+// ---- DOM path helper ----
 const domPathFn = `
 function getDomPath(el) {
   if (!el) return "";
@@ -97,7 +87,7 @@ function getDomPath(el) {
 }
 `;
 
-// ---------- Extraction logic ----------
+// ---- Main extraction logic ----
 async function extractPageData(page) {
   return await page.evaluate((domPathFn) => {
     eval(domPathFn);
@@ -109,7 +99,9 @@ async function extractPageData(page) {
       while (candidate && (candidate.tagName === "BR" || candidate.textContent.trim() === "")) {
         candidate = candidate.nextElementSibling;
       }
-      if (candidate && /^(H2|H3|H4|H5|H6|P|SPAN)$/i.test(candidate.tagName)) return candidate;
+      if (candidate && /^(H2|H3|H4|H5|H6|P|SPAN)$/i.test(candidate.tagName)) {
+        return candidate;
+      }
       return document.querySelector("h2, h3, h4, h5, h6, p, span, [data-strap], .subtitle, .tagline");
     })();
 
@@ -121,23 +113,30 @@ async function extractPageData(page) {
         "[aria-label*='join']", "[aria-label*='buy']", "[aria-label*='sign']",
         "[aria-label*='register']", "[aria-label*='demo']"
       ].join(", ");
+
       const disallowedAuth = /login|sign ?in|sign ?up/i;
 
-      let anchor = strap || h1;
-      let cand = anchor && anchor.nextElementSibling;
-      while (cand) {
-        if (cand.matches && cand.matches(selectors) &&
-            cand.textContent.trim().length > 0 && !disallowedAuth.test(cand.textContent.trim())) {
-          return cand;
+      let anchorNode = strap || h1;
+      let candidate = anchorNode && anchorNode.nextElementSibling;
+      while (candidate) {
+        if (
+          candidate.matches &&
+          candidate.matches(selectors) &&
+          candidate.textContent.trim().length > 0 &&
+          !disallowedAuth.test(candidate.textContent.trim())
+        ) {
+          return candidate;
         }
-        cand = cand.nextElementSibling;
+        candidate = candidate.nextElementSibling;
       }
-      const globals = Array.from(document.querySelectorAll(selectors)).filter(
-        el => el.textContent.trim().length > 0 &&
-              !disallowedAuth.test(el.textContent.trim()) &&
-              !el.closest("footer")
+
+      const globalCandidates = Array.from(document.querySelectorAll(selectors)).filter(
+        el =>
+          el.textContent.trim().length > 0 &&
+          !disallowedAuth.test(el.textContent.trim()) &&
+          !el.closest("footer")
       );
-      return globals[0] || null;
+      return globalCandidates.length ? globalCandidates[0] : null;
     })();
 
     return {
@@ -148,23 +147,7 @@ async function extractPageData(page) {
   }, domPathFn);
 }
 
-// ---------- Captcha detection ----------
-async function detectCaptcha(page) {
-  return await page.evaluate(() => {
-    const text = document.body.innerText.toLowerCase();
-    const selectors = [
-      "iframe[src*='recaptcha']",
-      "div#g-recaptcha",
-      "div.hcaptcha-box",
-      "input[name='captcha']",
-      "form[action*='captcha']"
-    ];
-    const has = selectors.some(sel => document.querySelector(sel));
-    return text.includes("captcha") || text.includes("verify you are human") || has;
-  });
-}
-
-// ---------- API: POST /analyze ----------
+// ---- analyze endpoint ----
 app.post("/analyze", async (req, res) => {
   const { url } = req.body;
   if (!url || !url.startsWith("http")) {
@@ -173,37 +156,9 @@ app.post("/analyze", async (req, res) => {
 
   let browser;
   try {
-    // headless first
     browser = await launchBrowser({ headless: true });
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-
-    if (await detectCaptcha(page)) {
-      await browser.close();
-
-      // retry non-headless once
-      browser = await launchBrowser({ headless: false });
-      const retryPage = await browser.newPage();
-      await retryPage.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-
-      if (await detectCaptcha(retryPage)) {
-        return res.status(403).json({
-          error: "Captcha detected — site blocked automated access (even with full browser)"
-        });
-      }
-
-      const retried = await extractPageData(retryPage);
-      await retryPage.close();
-      return res.json({
-        url,
-        above_the_fold: [
-          { element_name: "main page title/header", text: retried?.header?.text || "", dom_path: retried?.header?.dom || "" },
-          { element_name: "strap-line", text: retried?.strapline?.text || "", dom_path: retried?.strapline?.dom || "" },
-          { element_name: "primary CTA button", text: retried?.cta?.text || "", dom_path: retried?.cta?.dom || "" }
-        ],
-        notes: ""
-      });
-    }
 
     const extracted = await extractPageData(page);
     await page.close();
@@ -217,7 +172,6 @@ app.post("/analyze", async (req, res) => {
       ],
       notes: ""
     });
-
   } catch (err) {
     console.error("❌ Error analyzing page:", err);
     res.status(500).json({ error: err.message });
@@ -226,7 +180,12 @@ app.post("/analyze", async (req, res) => {
   }
 });
 
-// ---------- Start server (keep at bottom) ----------
+// Add a GET handler for /analyze (avoid 502 when opening in browser)
+app.get("/analyze", (req, res) => {
+  res.status(405).send("Use POST /analyze with JSON body: { \"url\": \"https://example.com\" }");
+});
+
+// ---- start server ----
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
