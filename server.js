@@ -1,8 +1,10 @@
 // server.js
 const express = require("express");
 const puppeteerExtra = require("puppeteer-extra");
-const { executablePath } = require("puppeteer"); // fallback path to Chromium
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+const { executablePath } = require("puppeteer"); // fallback to bundled Chromium (local dev)
+const fs = require("fs");
+const path = require("path");
 
 puppeteerExtra.use(StealthPlugin());
 
@@ -10,7 +12,7 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true })); // allow HTML form submissions
 
-// ---- Health check + simple test page ----
+// ---------- Simple test page ----------
 app.get("/", (req, res) => {
   res.send(`
     <h2>🚀 GPT DOM Extraction API</h2>
@@ -22,7 +24,55 @@ app.get("/", (req, res) => {
   `);
 });
 
-// ---- DOM path helper (runs in page context) ----
+// ---------- Chrome path resolution for Render ----------
+function findChromeUnder(base) {
+  try {
+    if (!fs.existsSync(base)) return null;
+    const versions = fs.readdirSync(base).filter(d => d.startsWith("linux-")).sort();
+    if (!versions.length) return null;
+    const latest = versions[versions.length - 1];
+    const candidate = path.join(base, latest, "chrome-linux64", "chrome");
+    return fs.existsSync(candidate) ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveChromePath() {
+  // 1) If explicitly set and exists, use it
+  const envPath = process.env.PUPPETEER_EXECUTABLE_PATH;
+  if (envPath && fs.existsSync(envPath)) return envPath;
+
+  // 2) Preferred: Chrome installed into the project slug during build
+  // Build Command should be:
+  // PUPPETEER_CACHE_DIR=$PWD/.cache/puppeteer npm install && npx puppeteer browsers install chrome
+  const inProject = findChromeUnder("/opt/render/project/.cache/puppeteer/chrome");
+  if (inProject) return inProject;
+
+  // 3) Fallback: older location in Render’s global cache
+  const inRenderCache = findChromeUnder("/opt/render/.cache/puppeteer/chrome");
+  if (inRenderCache) return inRenderCache;
+
+  // 4) Local development fallback
+  return executablePath();
+}
+
+// ---------- Puppeteer launcher ----------
+async function launchBrowser({ headless = true } = {}) {
+  return await puppeteerExtra.launch({
+    headless,
+    executablePath: resolveChromePath(),
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--no-zygote",
+      "--single-process"
+    ]
+  });
+}
+
+// ---------- DOM path helper (runs in page) ----------
 const domPathFn = `
 function getDomPath(el) {
   if (!el) return "";
@@ -47,26 +97,22 @@ function getDomPath(el) {
 }
 `;
 
-// ---- Extraction logic (runs in page) ----
+// ---------- Extraction logic ----------
 async function extractPageData(page) {
   return await page.evaluate((domPathFn) => {
     eval(domPathFn);
 
     const h1 = document.querySelector("h1");
 
-    // Strapline
     const strap = (() => {
       let candidate = h1 && h1.nextElementSibling;
       while (candidate && (candidate.tagName === "BR" || candidate.textContent.trim() === "")) {
         candidate = candidate.nextElementSibling;
       }
-      if (candidate && /^(H2|H3|H4|H5|H6|P|SPAN)$/i.test(candidate.tagName)) {
-        return candidate;
-      }
+      if (candidate && /^(H2|H3|H4|H5|H6|P|SPAN)$/i.test(candidate.tagName)) return candidate;
       return document.querySelector("h2, h3, h4, h5, h6, p, span, [data-strap], .subtitle, .tagline");
     })();
 
-    // CTA (skip auth)
     const cta = (() => {
       const selectors = [
         "a[role='button']", "button", "a.btn", ".btn", ".button", ".cta", ".primary",
@@ -80,15 +126,12 @@ async function extractPageData(page) {
       let anchor = strap || h1;
       let cand = anchor && anchor.nextElementSibling;
       while (cand) {
-        if (
-          cand.matches &&
-          cand.matches(selectors) &&
-          cand.textContent.trim().length > 0 &&
-          !disallowedAuth.test(cand.textContent.trim())
-        ) return cand;
+        if (cand.matches && cand.matches(selectors) &&
+            cand.textContent.trim().length > 0 && !disallowedAuth.test(cand.textContent.trim())) {
+          return cand;
+        }
         cand = cand.nextElementSibling;
       }
-
       const globals = Array.from(document.querySelectorAll(selectors)).filter(
         el => el.textContent.trim().length > 0 &&
               !disallowedAuth.test(el.textContent.trim()) &&
@@ -105,7 +148,7 @@ async function extractPageData(page) {
   }, domPathFn);
 }
 
-// ---- Captcha detection ----
+// ---------- Captcha detection ----------
 async function detectCaptcha(page) {
   return await page.evaluate(() => {
     const text = document.body.innerText.toLowerCase();
@@ -116,22 +159,12 @@ async function detectCaptcha(page) {
       "input[name='captcha']",
       "form[action*='captcha']"
     ];
-    const hasCaptcha = selectors.some(sel => document.querySelector(sel));
-    return text.includes("captcha") || text.includes("verify you are human") || hasCaptcha;
+    const has = selectors.some(sel => document.querySelector(sel));
+    return text.includes("captcha") || text.includes("verify you are human") || has;
   });
 }
 
-// ---- Helper: launch Puppeteer with correct Chrome path on Render ----
-async function launchBrowser({ headless = true } = {}) {
-  return await puppeteerExtra.launch({
-    headless,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
-    // Use Chrome installed by build step on Render, otherwise fallback to bundled Chromium
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || executablePath()
-  });
-}
-
-// ---- API: POST /analyze ----
+// ---------- API: POST /analyze ----------
 app.post("/analyze", async (req, res) => {
   const { url } = req.body;
   if (!url || !url.startsWith("http")) {
@@ -140,7 +173,7 @@ app.post("/analyze", async (req, res) => {
 
   let browser;
   try {
-    // 1) headless pass
+    // headless first
     browser = await launchBrowser({ headless: true });
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
@@ -148,13 +181,15 @@ app.post("/analyze", async (req, res) => {
     if (await detectCaptcha(page)) {
       await browser.close();
 
-      // 2) retry with full browser
+      // retry non-headless once
       browser = await launchBrowser({ headless: false });
       const retryPage = await browser.newPage();
       await retryPage.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
 
       if (await detectCaptcha(retryPage)) {
-        return res.status(403).json({ error: "Captcha detected — site blocked automated access (even with full browser)" });
+        return res.status(403).json({
+          error: "Captcha detected — site blocked automated access (even with full browser)"
+        });
       }
 
       const retried = await extractPageData(retryPage);
@@ -182,6 +217,7 @@ app.post("/analyze", async (req, res) => {
       ],
       notes: ""
     });
+
   } catch (err) {
     console.error("❌ Error analyzing page:", err);
     res.status(500).json({ error: err.message });
@@ -190,7 +226,7 @@ app.post("/analyze", async (req, res) => {
   }
 });
 
-// ---- start server (keep at bottom) ----
+// ---------- Start server (keep at bottom) ----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
