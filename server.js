@@ -26,7 +26,6 @@ app.get("/", (req, res) => {
   `);
 });
 
-// Optional: avoid 502 if someone opens /analyze directly in browser
 app.get("/analyze", (req, res) => {
   res
     .status(405)
@@ -35,9 +34,6 @@ app.get("/analyze", (req, res) => {
 
 // ------------------------------------------------------------------
 // Resolve Chrome path on Render
-// We install Chrome into the *project slug* so it persists at runtime.
-// Build Command (Render Settings) should be:
-// PUPPETEER_CACHE_DIR=$PWD/.cache/puppeteer PUPPETEER_DOWNLOAD_PATH=$PWD/.cache/puppeteer npm install && npx puppeteer browsers install chrome
 // ------------------------------------------------------------------
 function findChromeUnder(baseDir) {
   try {
@@ -56,27 +52,37 @@ function findChromeUnder(baseDir) {
 }
 
 function resolveChromePath() {
-  // 1) If user explicitly set an env var and it exists, use it
+  // 1) Environment variable override
   const envPath = process.env.PUPPETEER_EXECUTABLE_PATH;
-  if (envPath && fs.existsSync(envPath)) return envPath;
+  if (envPath && fs.existsSync(envPath)) {
+    console.log("✅ Using Chrome from env var:", envPath);
+    return envPath;
+  }
 
-  // 2) ✅ Preferred: Chrome installed into the project slug (persists at runtime)
+  // 2) Preferred: Chrome inside project slug (persists at runtime)
   const projectCache = findChromeUnder(
-    "/opt/render/project/.cache/puppeteer/chrome"
+    "/opt/render/project/src/.cache/puppeteer/chrome"
   );
-  if (projectCache) return projectCache;
+  if (projectCache) {
+    console.log("✅ Using Chrome from project cache:", projectCache);
+    return projectCache;
+  }
 
-  // 3) ⚠️ Fallback: older global cache (may not exist at runtime)
+  // 3) Fallback: global cache (may not exist at runtime)
   const globalCache = findChromeUnder(
     "/opt/render/.cache/puppeteer/chrome"
   );
-  if (globalCache) return globalCache;
+  if (globalCache) {
+    console.log("⚠️ Using Chrome from global cache:", globalCache);
+    return globalCache;
+  }
 
-  // 4) Local development fallback: Puppeteer’s bundled Chromium
+  // 4) Local fallback: Puppeteer’s bundled Chromium
+  console.warn("⚠️ No cached Chrome found, using bundled Chromium");
   return executablePath();
 }
 
-// Centralized launcher with safe flags for containers
+// Centralized launcher
 async function launchBrowser({ headless = true } = {}) {
   const chromePath = resolveChromePath();
   return await puppeteerExtra.launch({
