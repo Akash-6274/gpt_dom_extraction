@@ -5,7 +5,6 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "postinstall": "npx puppeteer browsers install chrome",
     "clean": "node -e \"const fs=require('fs'); const {execSync}=require('child_process'); if(fs.existsSync('node_modules')) execSync(process.platform==='win32' ? 'rmdir /s /q node_modules' : 'rm -rf node_modules'); if(fs.existsSync('package-lock.json')) fs.unlinkSync('package-lock.json'); console.log('✅ Clean complete');\""
   },
   "keywords": [
