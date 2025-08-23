@@ -6,10 +6,18 @@ const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 puppeteer.use(StealthPlugin());
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true })); // ✅ allow HTML form submissions
 
-// ---- Health check route ----
+// ---- Health check + test page ----
 app.get("/", (req, res) => {
-  res.send("✅ API is live! Use POST /analyze with { url: 'https://example.com' }");
+  res.send(`
+    <h2>🚀 GPT DOM Extraction API</h2>
+    <p>Submit a URL to test the <code>/analyze</code> endpoint.</p>
+    <form method="POST" action="/analyze">
+      <input type="text" name="url" placeholder="https://example.com" size="50" />
+      <button type="submit">Analyze</button>
+    </form>
+  `);
 });
 
 // ---- DOM path helper ----
