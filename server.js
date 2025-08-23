@@ -265,7 +265,6 @@ app.post("/analyze", async (req, res) => {
         { element_name: "strap-line", text: data?.strapline?.text || "", dom_path: data?.strapline?.dom || "" },
         { element_name: "primary CTA button", text: data?.cta?.text || "", dom_path: data?.cta?.dom || "" }
       ],
-      notes: ""
     });
   } catch (err) {
     console.error("❌ Error analyzing page:", err);
