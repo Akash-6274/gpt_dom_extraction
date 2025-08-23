@@ -125,6 +125,15 @@ async function detectCaptcha(page) {
   });
 }
 
+// ---- Helper: launch Puppeteer with correct Chrome path ----
+async function launchBrowser(options = {}) {
+  return await puppeteer.launch({
+    headless: options.headless ?? true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || puppeteer.executablePath()
+  });
+}
+
 // ---- analyze endpoint ----
 app.post("/analyze", async (req, res) => {
   const { url } = req.body;
@@ -135,11 +144,7 @@ app.post("/analyze", async (req, res) => {
   let browser;
   try {
     // Try headless first
-    browser = await puppeteer.launch({
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined
-    });
+    browser = await launchBrowser({ headless: true });
 
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
@@ -149,11 +154,7 @@ app.post("/analyze", async (req, res) => {
       await browser.close();
 
       // Retry in non-headless mode (once)
-      browser = await puppeteer.launch({
-        headless: false,
-        args: ["--no-sandbox", "--disable-setuid-sandbox"],
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined
-      });
+      browser = await launchBrowser({ headless: false });
       const retryPage = await browser.newPage();
       await retryPage.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
 
