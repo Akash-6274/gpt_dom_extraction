@@ -4,11 +4,12 @@ const puppeteer = require("puppeteer-extra");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 
 puppeteer.use(StealthPlugin());
+
 const app = express();
 app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // ✅ allow HTML form submissions
+app.use(express.urlencoded({ extended: true })); // allow HTML form posts
 
-// ---- Health check + test page ----
+// ---- Health check + simple test page ----
 app.get("/", (req, res) => {
   res.send(`
     <h2>🚀 GPT DOM Extraction API</h2>
@@ -45,14 +46,13 @@ function getDomPath(el) {
 }
 `;
 
-// ---- Main extraction logic ----
+// ---- page extraction ----
 async function extractPageData(page) {
   return await page.evaluate((domPathFn) => {
     eval(domPathFn);
 
     const h1 = document.querySelector("h1");
 
-    // Strapline detection
     const strap = (() => {
       let candidate = h1 && h1.nextElementSibling;
       while (candidate && (candidate.tagName === "BR" || candidate.textContent.trim() === "")) {
@@ -64,7 +64,6 @@ async function extractPageData(page) {
       return document.querySelector("h2, h3, h4, h5, h6, p, span, [data-strap], .subtitle, .tagline");
     })();
 
-    // CTA detection (skip login/signup)
     const cta = (() => {
       const selectors = [
         "a[role='button']", "button", "a.btn", ".btn", ".button", ".cta", ".primary",
@@ -76,7 +75,6 @@ async function extractPageData(page) {
 
       const disallowedAuth = /login|sign ?in|sign ?up/i;
 
-      // Prefer CTA near strapline/h1
       let anchorNode = strap || h1;
       let candidate = anchorNode && anchorNode.nextElementSibling;
       while (candidate) {
@@ -91,7 +89,6 @@ async function extractPageData(page) {
         candidate = candidate.nextElementSibling;
       }
 
-      // Fallback global search
       const globalCandidates = Array.from(document.querySelectorAll(selectors)).filter(
         el =>
           el.textContent.trim().length > 0 &&
@@ -109,7 +106,7 @@ async function extractPageData(page) {
   }, domPathFn);
 }
 
-// ---- Captcha detection ----
+// ---- captcha detection ----
 async function detectCaptcha(page) {
   return await page.evaluate(() => {
     const text = document.body.innerText.toLowerCase();
@@ -125,16 +122,18 @@ async function detectCaptcha(page) {
   });
 }
 
-// ---- Helper: launch Puppeteer with correct Chrome path ----
-async function launchBrowser(options = {}) {
+// ---- helper to launch Puppeteer with correct Chrome on Render ----
+async function launchBrowser({ headless = true } = {}) {
   return await puppeteer.launch({
-    headless: options.headless ?? true,
+    headless,
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || puppeteer.executablePath()
+    // On Render, postinstall or build command installs Chrome and sets this var.
+    // Locally, fall back to Puppeteer's bundled Chromium.
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined
   });
 }
 
-// ---- analyze endpoint ----
+// ---- API: POST /analyze ----
 app.post("/analyze", async (req, res) => {
   const { url } = req.body;
   if (!url || !url.startsWith("http")) {
@@ -143,17 +142,13 @@ app.post("/analyze", async (req, res) => {
 
   let browser;
   try {
-    // Try headless first
     browser = await launchBrowser({ headless: true });
-
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
 
-    // Check captcha
     if (await detectCaptcha(page)) {
       await browser.close();
 
-      // Retry in non-headless mode (once)
       browser = await launchBrowser({ headless: false });
       const retryPage = await browser.newPage();
       await retryPage.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
@@ -177,7 +172,6 @@ app.post("/analyze", async (req, res) => {
       });
     }
 
-    // If no captcha
     const extracted = await extractPageData(page);
     await page.close();
 
@@ -199,7 +193,7 @@ app.post("/analyze", async (req, res) => {
   }
 });
 
-// ---- start server ----
+// ---- start server (MUST be at the very bottom) ----
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
