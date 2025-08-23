@@ -82,7 +82,7 @@ app.get("/", (req, res) => {
     <body>
       <div class="container">
         <h1> GPT DOM Extraction</h1>
-        <p>Submit a URL to <code>/analyze</code> endpoint.</p>
+        <p>Submit a URL to analyze endpoint.</p>
         <form method="POST" action="/analyze">
           <input type="text" name="url" placeholder="https://example.com" />
           <button type="submit">Analyze</button>
