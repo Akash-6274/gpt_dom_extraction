@@ -196,49 +196,153 @@ async function extractPageData(page) {
   return await page.evaluate((domPathFn) => {
     eval(domPathFn);
 
+    // ----------------- Helpers -----------------
+    const textOf = (el) => (el?.innerText || el?.textContent || "").trim().replace(/\s+/g, " ");
+    const isElementVisible = (el) => {
+      if (!el || !el.getBoundingClientRect) return false;
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      if (style.display === "none" || style.visibility === "hidden" || parseFloat(style.opacity || "1") === 0) {
+        return false;
+      }
+      if (rect.width === 0 || rect.height === 0) return false;
+      return true;
+    };
+
+    // ----------------- HEADER -----------------
     const h1 = document.querySelector("h1");
 
+    // ----------------- STRAPLINE -----------------
     const strap = (() => {
-      let c = h1 && h1.nextElementSibling;
-      while (c && (c.tagName === "BR" || c.textContent.trim() === "")) c = c.nextElementSibling;
-      if (c && /^(H2|H3|H4|H5|H6|P|SPAN)$/i.test(c.tagName)) return c;
-      return document.querySelector("h2, h3, h4, h5, h6, p, span, [data-strap], .subtitle, .tagline");
-    })();
+      if (!h1) return null;
 
-    const cta = (() => {
-      const selectors = [
-        "a[role='button']", "button", "a.btn", ".btn", ".button", ".cta", ".primary",
-        ".hero-btn", ".hero-button", "[data-cta]",
-        "[aria-label*='try']", "[aria-label*='start']", "[aria-label*='get']",
-        "[aria-label*='join']", "[aria-label*='buy']", "[aria-label*='sign']",
-        "[aria-label*='register']", "[aria-label*='demo']"
-      ].join(", ");
-      const disallowedAuth = /login|sign ?in|sign ?up/i;
-
-      let anchor = strap || h1;
-      let c = anchor && anchor.nextElementSibling;
-      while (c) {
-        if (c.matches && c.matches(selectors) &&
-            c.textContent.trim().length > 0 &&
-            !disallowedAuth.test(c.textContent.trim())) return c;
-        c = c.nextElementSibling;
+      // 1) Immediate sibling after H1
+      let c = h1.nextElementSibling;
+      while (c && (c.tagName === "BR" || !textOf(c))) c = c.nextElementSibling;
+      if (c && /^(H2|H3|H4|H5|H6|P|SPAN|DIV)$/i.test(c.tagName) && textOf(c).length > 0) {
+        return c;
       }
 
-      const global = Array.from(document.querySelectorAll(selectors)).filter(
-        el => el.textContent.trim().length > 0 &&
-              !disallowedAuth.test(el.textContent.trim()) &&
-              !el.closest("footer")
-      );
+      // 2) Search inside same container/section
+      const container = h1.closest("section, div, header, main");
+      if (container) {
+        const candidates = Array.from(container.querySelectorAll("p, span, div, h2, h3, h4, h5, h6"))
+          .filter(el =>
+            el !== h1 &&
+            textOf(el).length > 0 &&
+            textOf(el).length < 200 &&
+            !/cookie|login|sign ?in|sign ?up/i.test(textOf(el))
+          );
+        if (candidates.length) return candidates[0];
+      }
+
+      // 3) Global fallback
+      const global = Array.from(document.querySelectorAll("p, span, div, h2, h3, h4, h5, h6, [data-strap], .subtitle, .tagline"))
+        .filter(el =>
+          textOf(el).length > 0 &&
+          textOf(el).length < 200 &&
+          !/cookie|login|sign ?in|sign ?up/i.test(textOf(el))
+        );
       return global[0] || null;
     })();
 
+    const anchorY = (strap || h1)?.getBoundingClientRect?.().top ?? 0;
+
+    // ----------------- CTA DETECTION -----------------
+    const scoreCandidate = (el) => {
+      if (!el || !isElementVisible(el)) return -Infinity;
+
+      const t = textOf(el).toLowerCase();
+      const rect = el.getBoundingClientRect();
+      let score = 0;
+
+      // Intent scoring
+      const weightMap = [
+        [/^(get|create|start|try)\b.*(now|free|trial)?/, 7],
+        [/\b(buy|shop|purchase|add to cart|checkout|pre[- ]?order)\b/, 7],
+        [/\b(subscribe|upgrade|go pro|go premium|activate|install)\b/, 6],
+        [/\b(book|request|schedule)\b.*\b(demo|call|meeting|consult(ation)?)\b/, 6],
+        [/\b(contact|talk to)\b.*\b(sales|expert|team)\b/, 6],
+        [/\b(request|get)\b.*\b(quote|pricing)\b/, 5],
+        [/\b(download|get the app|get app)\b/, 5],
+        [/\b(enroll|join|apply)\b/, 5],
+        [/\b(donate|give now)\b/, 6],
+        [/\b(learn more|discover more|see plans?)\b/, 3],
+      ];
+      for (const [re, w] of weightMap) if (re.test(t)) score += w;
+
+      // Negatives
+      const negatives = [/cookie/i, /log ?in/i, /sign ?in/i, /404/i];
+      for (const re of negatives) if (re.test(t)) score -= 10;
+
+      // Class/ID hints
+      const cls = (el.className || "").toLowerCase();
+      const id = (el.id || "").toLowerCase();
+      const attr = (el.getAttribute("aria-label") || "").toLowerCase();
+      if (/primary|cta|hero|wp-block-button__link|btn/.test(cls + " " + id) ||
+          /\b(primary|cta|start|get|try|buy|shop|subscribe|upgrade|demo|sales)\b/.test(attr)) {
+        score += 2;
+      }
+
+      // Type
+      const tag = el.tagName.toLowerCase();
+      if (tag === "button") score += 2;
+      if (tag === "a" && (cls.includes("btn") || el.getAttribute("role") === "button")) score += 2;
+      if (tag === "input" && /submit|button/.test((el.getAttribute("type") || "").toLowerCase())) score += 2;
+
+      // Placement
+      const top = rect.top + window.scrollY;
+      if (top < 1200) score += 2;
+      if (top < 600) score += 1;
+      if (el.closest("footer")) score -= 4;
+      if (el.closest("nav")) score -= 2;
+
+      // Proximity to hero
+      const d = Math.abs(rect.top - anchorY);
+      if (d < 300) score += 2;
+      else if (d < 600) score += 1;
+
+      // Size
+      if (rect.width * rect.height > 44 * 44) score += 1;
+
+      return score;
+    };
+
+    const ctaSelectors = [
+      "button",
+      "a[role='button']",
+      "a.btn, a.button, a.cta, a.primary",
+      "button.btn, button.button, button.cta, button.primary",
+      "[data-cta], [data-testid*='cta']",
+      "[aria-label*='try' i], [aria-label*='start' i], [aria-label*='get' i], [aria-label*='join' i], [aria-label*='buy' i], [aria-label*='shop' i], [aria-label*='sign up' i], [aria-label*='register' i], [aria-label*='demo' i], [aria-label*='subscribe' i], [aria-label*='download' i], [aria-label*='contact sales' i]",
+      "input[type='submit'], input[type='button'], input[type='image']",
+      ".wp-block-button__link",
+      "[class*='btn']", "[class*='button']", "[class*='cta']"
+    ].join(", ");
+
+    const candidates = Array.from(document.querySelectorAll(ctaSelectors))
+      .filter((el, idx, arr) => arr.findIndex(e => e === el) === idx)
+      .filter((el) => textOf(el).length > 0 || (el.tagName.toLowerCase() === "input" && (el.getAttribute("value") || "").trim().length > 0));
+
+    let best = null;
+    let bestScore = -Infinity;
+    for (const el of candidates) {
+      const s = scoreCandidate(el);
+      if (s > bestScore) {
+        best = el;
+        bestScore = s;
+      }
+    }
+
+    // ----------------- RETURN -----------------
     return {
       header: h1 ? { text: h1.innerText.trim(), dom: getDomPath(h1) } : null,
-      strapline: strap ? { text: strap.textContent.trim(), dom: getDomPath(strap) } : null,
-      cta: cta ? { text: cta.textContent.trim(), dom: getDomPath(cta) } : null
+      strapline: strap ? { text: textOf(strap), dom: getDomPath(strap) } : null,
+      cta: best ? { text: textOf(best) || (best.getAttribute("value") || "").trim(), dom: getDomPath(best) } : null
     };
   }, domPathFn);
 }
+
 
 // ------------------------------------------------------------------
 // API: POST /analyze
