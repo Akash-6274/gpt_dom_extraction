@@ -716,7 +716,20 @@ app.post("/analyze", async (req, res) => {
 
     const data = await extractPageData(page);
     await page.close();
-
+// send results to requestbin
+await fetch("https://eoiaqcjb6jojitw.m.pipedream.net", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    id: id || null,
+    url,
+    above_the_fold: [
+      { element_name: "main page title/header", text: data?.header?.text || "", dom_path: data?.header?.dom || "" },
+      { element_name: "strap-line", text: data?.strapline?.text || "", dom_path: data?.strapline?.dom || "" },
+      { element_name: "primary CTA button", text: data?.cta?.text || "", dom_path: data?.cta?.dom || "" }
+    ]
+  })
+});
     return res.json({
       id: id || null, // ✅ include client’s page_id
       url,
